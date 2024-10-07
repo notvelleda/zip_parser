@@ -499,14 +499,16 @@ impl<const N: usize> Default for LocalFileInfo<N> {
 
 /// File instance in the zip pack. You can get it by iterating over the [`Parser`].
 #[derive(Debug)]
-pub struct LocalFile<'a, S: Read, const N: usize> {
+pub struct LocalFile<'a, S: Read + Seek, const N: usize> {
     pub info: LocalFileInfo<N>,
 
     stream: *mut S,
+    stream_origin: u64,
+    stream_position: u64,
     _marker: PhantomData<&'a mut S>,
 }
 
-impl<'a, S: Read, const N: usize> LocalFile<'a, S, N> {
+impl<'a, S: Read + Seek, const N: usize> LocalFile<'a, S, N> {
     pub fn with_compression_method(mut self, method: CompressMethod) -> Self {
         self.info.compression_method = method;
         self
@@ -524,21 +526,25 @@ impl<'a, S: Read, const N: usize> LocalFile<'a, S, N> {
 
     pub fn with_stream(mut self, stream: &mut S) -> Self {
         self.stream = stream;
+        self.stream_origin = stream.seek(SeekFrom::Current(0)).unwrap_or(0);
+        self.stream_position = self.stream_origin;
         self
     }
 }
 
-impl<'a, S: Read, const N: usize> Default for LocalFile<'a, S, N> {
+impl<'a, S: Read + Seek, const N: usize> Default for LocalFile<'a, S, N> {
     fn default() -> Self {
         Self {
             info: Default::default(),
             stream: ptr::null_mut(),
+            stream_origin: 0,
+            stream_position: 0,
             _marker:  PhantomData::default(),
         }
     }
 }
 
-impl<'a, S: Read, const N: usize> LocalFileOps for LocalFile<'a, S, N> {
+impl<'a, S: Read + Seek, const N: usize> LocalFileOps for LocalFile<'a, S, N> {
     fn file_name(&self) -> Result<&str, Utf8Error> {
         self.info.file_name()
     }
@@ -549,19 +555,29 @@ impl<'a, S: Read, const N: usize> LocalFileOps for LocalFile<'a, S, N> {
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, ParsingError> {
         unsafe {
-            self.stream
+            let stream = self.stream
                 .as_mut()
-                .ok_or(ParsingError::InvalidStream)
-                .and_then(|s| s.read(buf))
+                .ok_or(ParsingError::InvalidStream)?;
+
+            stream.seek(SeekFrom::Start(self.stream_position)).map_err(|_| ParsingError::InvalidStream)?;
+            let bytes_read = stream.read(buf)?;
+            self.stream_position += u64::try_from(bytes_read).map_err(|_| ParsingError::InvalidStream)?;
+
+            Ok(bytes_read)
         }
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<usize, ParsingError> {
         unsafe {
-            self.stream
+            let stream = self.stream
                 .as_mut()
-                .ok_or(ParsingError::InvalidStream)
-                .and_then(|s| s.read_exact(buf))
+                .ok_or(ParsingError::InvalidStream)?;
+
+            stream.seek(SeekFrom::Start(self.stream_position)).map_err(|_| ParsingError::InvalidStream)?;
+            let bytes_read = stream.read_exact(buf)?;
+            self.stream_position += u64::try_from(bytes_read).map_err(|_| ParsingError::InvalidStream)?;
+
+            Ok(bytes_read)
         }
     }
 }
@@ -664,6 +680,8 @@ impl<'a, S: Read + Seek, const N: usize> Iterator for SeekingParser<'a, S, N> {
                     if matches!(self.stream.read(&mut local_header_buf), Ok(n) if n == local_header_buf.len()) {
                         if let Some(local_header) = unsafe { LocalFileHeader::from_bytes(&local_header_buf) } {
                             file.info.file_data_offset = file_info.relative_offset_of_local_header as u64 + local_header.len() as u64;
+                            file.stream_origin = file.info.file_data_offset;
+                            file.stream_position = file.info.file_data_offset;
                             Some(file)
                         } else {
                             #[cfg(feature = "std")]
@@ -695,7 +713,7 @@ impl<'a, S: Read + Seek, const N: usize> Iterator for SeekingParser<'a, S, N> {
     }
 }
 
-pub struct SequentialParser<'a, S: Read, const N: usize = 128> {
+/*pub struct SequentialParser<'a, S: Read, const N: usize = 128> {
     /// holding the file handle
     stream: &'a mut S,
 
@@ -822,7 +840,7 @@ impl<'a, S: Read, const N: usize> Iterator for SequentialParser<'a, S, N> {
             None
         }
     }
-}
+}*/
 
 
 #[derive(Debug, Clone, Copy)]
@@ -1234,7 +1252,7 @@ pub mod prelude {
     pub use crate::{
         LocalFile, LocalFileOps,
         Parser, ParsingError, ParserEvent,
-        SequentialParser, SeekingParser, PassiveParser,
+        /*SequentialParser,*/ SeekingParser, PassiveParser,
     };
 }
 
